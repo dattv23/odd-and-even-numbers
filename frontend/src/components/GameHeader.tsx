@@ -33,7 +33,16 @@ const GameHeader: React.FC<GameHeaderProps> = ({ isPlayable, player, message, wi
         </button>
       </div>
       <div className='mt-2 h-14 text-center font-extrabold text-[#A8BFC9]'>
-        {isPlayable && <p>{player} (You)</p>}
+        {isPlayable && (
+          <p>
+            {player == 'Odd' ? (
+              <span className='text-[#31C3BD]'>Odd</span>
+            ) : (
+              <span className='text-[#F2B137]'>Even</span>
+            )}{' '}
+            (You)
+          </p>
+        )}
         {message && <p>{message}</p>}
         {winner && winner == player && <p>YOU WON!</p>}
         {winner && winner != player && <p>OH NO, YOU LOST...</p>}
