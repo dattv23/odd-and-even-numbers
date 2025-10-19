@@ -2,141 +2,157 @@ import { randomUUID } from 'crypto'
 import { WebSocketServer, WebSocket as WS } from 'ws'
 
 const wsServer = new WebSocketServer({ port: 8888 })
+console.log('✅ WebSocket server running on ws://localhost:8888')
+
+type Role = 'Odd' | 'Even'
 
 type Room = {
   id: string
   players: Set<WS>
   readyPlayers: Set<WS>
+  roles: Map<WS, Role>
 }
 
 const rooms: Record<string, Room> = {}
 
-function findAvailableRoom(): Room | null {
-  for (const roomId in rooms) {
-    const room = rooms[roomId]
-    if (room && room.players.size < 2) {
-      return room
-    }
-  }
-  return null
+const findAvailableRoom = (): Room | null => Object.values(rooms).find((r) => r.players.size < 2) ?? null
+
+const broadcast = (room: Room, message: object) => {
+  const json = JSON.stringify(message)
+  room.players.forEach((p) => p.send(json))
 }
 
-function broadcast(room: Room, message: object) {
-  const json = JSON.stringify(message)
-  for (const player of room.players) {
-    player.send(json)
-  }
+const getAvailableRole = (room: Room): Role => {
+  const taken = new Set(room.roles.values())
+  return taken.has('Odd') ? 'Even' : 'Odd'
 }
 
 wsServer.on('connection', (ws) => {
-  let assignedRoom: Room | null = findAvailableRoom()
+  let room = findAvailableRoom()
 
-  if (!assignedRoom) {
+  if (!room) {
     const newRoomId = randomUUID()
-    assignedRoom = {
+    room = {
       id: newRoomId,
       players: new Set(),
-      readyPlayers: new Set()
+      readyPlayers: new Set(),
+      roles: new Map()
     }
-    rooms[newRoomId] = assignedRoom
+    rooms[newRoomId] = room
     console.log(`🆕 Created new room: ${newRoomId}`)
   }
 
-  assignedRoom.players.add(ws)
-  console.log(`👤 Player joined room ${assignedRoom.id} (${assignedRoom.players.size}/2)`)
+  room.players.add(ws)
+  const role = getAvailableRole(room)
+  room.roles.set(ws, role)
 
-  const playerRole = assignedRoom.players.size === 1 ? 'Odd' : 'Even'
-  ws.send(JSON.stringify({ type: 'START', data: { player: playerRole, roomId: assignedRoom.id } }))
+  ws.send(JSON.stringify({ type: 'START', data: { player: role, roomId: room.id } }))
+  console.log(`👤 Player joined room ${room.id} (${room.players.size}/2) as ${role}`)
 
-  if (assignedRoom.players.size === 1) {
-    broadcast(assignedRoom, { type: 'WAITING_FOR_PLAYER', data: {} })
-  }
-
-  if (assignedRoom.players.size === 2) {
-    broadcast(assignedRoom, { type: 'PLAYABLE', data: {} })
-    console.log(`🎮 Room ${assignedRoom.id} is now playable!`)
-  }
+  if (room.players.size === 1) broadcast(room, { type: 'WAITING_FOR_PLAYER' })
+  else if (room.players.size === 2) broadcast(room, { type: 'PLAYABLE' })
 
   ws.on('message', (msg) => {
-    const message = msg.toString()
-    const { type, data } = JSON.parse(message)
+    const { type, data } = JSON.parse(msg.toString())
 
     switch (type) {
-      case 'INCREMENT':
-        broadcast(assignedRoom, {
-          type: 'UPDATE',
-          data
-        })
+      case 'INCREMENT': {
+        const { square, currentValue } = data
+        broadcast(room!, { type: 'UPDATE', data: { square, newValue: currentValue + 1 } })
         break
-      case 'PLAY_AGAIN':
-        assignedRoom.readyPlayers.add(ws)
-        console.log(`🔁 ${assignedRoom.readyPlayers.size}/2 ready for restart in ${assignedRoom.id}`)
-        if (assignedRoom.readyPlayers.size === 2) {
-          assignedRoom.readyPlayers.clear()
-          broadcast(assignedRoom, { type: 'PLAY_AGAIN', data: {} })
-          console.log(`✅ Both players confirmed restart in ${assignedRoom.id}`)
+      }
+
+      case 'PLAY_AGAIN': {
+        room!.readyPlayers.add(ws)
+
+        if (room!.readyPlayers.size === 2) {
+          room!.readyPlayers.clear()
+          broadcast(room!, { type: 'PLAY_AGAIN' })
+          console.log(`🔁 Both players confirmed restart in ${room!.id}`)
         } else {
-          for (const player of assignedRoom.players) {
-            if (player === ws) {
-              player.send(
-                JSON.stringify({
-                  type: 'OPPONENT_WAITING',
-                  data: {
-                    message: 'Waiting for opponent confirm to play again...'
-                  }
-                })
-              )
-            }
-          }
+          ws.send(
+            JSON.stringify({
+              type: 'OPPONENT_WAITING',
+              data: { message: 'Waiting for opponent confirm to play again...' }
+            })
+          )
         }
         break
-      case 'NEW_GAME':
-        assignedRoom.players.delete(ws)
-        if (assignedRoom.players.size === 0) {
-          delete rooms[assignedRoom.id]
-          console.log(`🗑️ Deleted old room: ${assignedRoom.id}`)
+      }
+
+      case 'NEW_GAME': {
+        const myRole = room!.roles.get(ws)
+
+        if (room!.players.size === 1) {
+          room!.readyPlayers.clear()
+          ws.send(
+            JSON.stringify({
+              type: 'NEW_GAME',
+              data: { roomId: room!.id, player: myRole }
+            })
+          )
+          broadcast(room!, { type: 'WAITING_FOR_PLAYER' })
+          console.log(`🔁 Single player restarted room ${room!.id} as ${myRole}`)
+          break
         }
+
+        room!.players.delete(ws)
+        room!.readyPlayers.delete(ws)
+        room!.roles.delete(ws)
+
+        if (room!.players.size === 0) delete rooms[room!.id]
+
         const newRoomId = randomUUID()
-        const newRoom: Room = { id: newRoomId, players: new Set([ws]), readyPlayers: new Set() }
+        const newRoom: Room = {
+          id: newRoomId,
+          players: new Set([ws]),
+          readyPlayers: new Set(),
+          roles: new Map([[ws, 'Odd']])
+        }
         rooms[newRoomId] = newRoom
+        room = newRoom
 
         ws.send(
           JSON.stringify({
             type: 'NEW_GAME',
-            data: {
-              roomId: newRoomId,
-              player: 'Odd'
-            }
+            data: { roomId: newRoomId, player: 'Odd' }
           })
         )
+        console.log(`🎮 Created new room ${newRoomId} with player as Odd`)
+        break
+      }
 
-        console.log(`🎮 ${assignedRoom.id} → created new room ${newRoomId}`)
-        break
-        break
       default:
+        console.warn(`⚠️ Unknown message type: ${type}`)
         break
     }
   })
 
   ws.on('close', () => {
-    if (!assignedRoom) return
+    if (!room) return
 
-    assignedRoom.players.delete(ws)
-    console.log(`❌ Player left room ${assignedRoom.id} (${assignedRoom.players.size}/2)`)
+    room.players.delete(ws)
+    room.readyPlayers.delete(ws)
+    room.roles.delete(ws)
+    console.log(`❌ Player left room ${room.id} (${room.players.size}/2)`)
 
-    if (assignedRoom.players.size > 0) {
-      for (const p of assignedRoom.players) {
-        p.send(
-          JSON.stringify({
-            type: 'PLAYER_LEFT',
-            data: { message: 'Opponent disconnected. Waiting for opponent reconnect...' }
-          })
-        )
-        p.close()
-      }
+    if (room.players.size > 0) {
+      broadcast(room, {
+        type: 'PLAYER_LEFT',
+        data: { message: 'Opponent disconnected. Waiting for opponent reconnect...' }
+      })
+    } else {
+      delete rooms[room.id]
+      console.log(`🧹 Deleted empty room ${room.id}`)
     }
-
-    delete rooms[assignedRoom.id]
-    console.log(`🗑️ Deleted empty room: ${assignedRoom.id}`)
   })
 })
+
+setInterval(() => {
+  for (const id in rooms) {
+    if (rooms[id]!.players.size === 0) {
+      delete rooms[id]
+      console.log(`🧹 Auto-clean empty room ${id}`)
+    }
+  }
+}, 10000)
